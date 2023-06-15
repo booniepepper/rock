@@ -12,7 +12,9 @@ const Token = tokens.Token;
 
 const RockString = []const u8;
 pub const RockDictionary = StringHashMap(RockCommand);
-pub const RockNest = SinglyLinkedList(*RockStack);
+pub const RockStack = SinglyLinkedList(RockVal);
+pub const RockNode = RockStack.Node;
+pub const RockNest = SinglyLinkedList(RockStack);
 
 pub const RockError = error{
     TooManyRightBrackets,
@@ -24,15 +26,14 @@ pub const RockError = error{
 };
 
 pub const RockMachine = struct {
-    curr: *RockStack,
+    curr: RockStack,
     nest: RockNest,
     depth: u8,
     dictionary: RockDictionary,
 
     pub fn init(dict: RockDictionary) !RockMachine {
-        var stack = RockStack{};
         return .{
-            .curr = &stack,
+            .curr = RockStack{},
             .nest = RockNest{},
             .depth = 0,
             .dictionary = dict,
@@ -41,7 +42,10 @@ pub const RockMachine = struct {
 
     pub fn interpret(self: *RockMachine, tok: Token) !RockMachine {
         switch (tok) {
-            .term => |cmdName| return self.handleCmd(cmdName),
+            .term => |cmdName| {
+                var cmdRef = cmdName;
+                return self.handleCmd(&cmdRef);
+            },
             .left_bracket => {
                 self.pushContext();
                 self.depth += 1;
@@ -51,52 +55,61 @@ pub const RockMachine = struct {
                 if (self.depth < 0) {
                     return RockError.TooManyRightBrackets;
                 }
-                var quote = try self.popContext();
-                self.push(RockVal{ .quote = quote });
+
+                var quote = RockVal.ofQuote(try self.popContext());
+                self.push(quote);
             },
-            .bool => |b| self.push(RockVal{ .bool = b }),
-            .i64 => |i| self.push(RockVal{ .i64 = i }),
-            .f64 => |f| self.push(RockVal{ .f64 = f }),
-            .string => |s| self.push(RockVal{ .string = s }),
-            .deferred_term => |cmd| self.push(RockVal{ .command = cmd }),
+            .bool => |b| self.push(RockVal.ofBool(b)),
+            .i64 => |i| self.push(RockVal.ofI64(i)),
+            .f64 => |f| self.push(RockVal.ofF64(f)),
+            .string => |s| {
+                var sRef = s;
+                self.push(RockVal.ofString(&sRef));
+            },
+            .deferred_term => |cmd| {
+                var cmdRef = cmd;
+                self.push(RockVal.ofCommand(&cmdRef));
+            },
             .none => {},
         }
+        try self.debug();
         return self.*;
     }
 
+    fn debug(self: RockMachine) !void {
+        var node = self.curr.first;
+        try stderr.print("CONTEXT: [ ", .{});
+        while (node) |curr| : (node = curr.next) {
+            try curr.data.print();
+            try stderr.print(" ", .{});
+        }
+        try stderr.print("]\n", .{});
+    }
+
     fn handle(self: *RockMachine, val: RockVal) anyerror!RockMachine {
-        switch (val) {
-            .command => |cmdName| return self.handleCmd(cmdName),
+        switch (val.type) {
+            .command => return self.handleCmd(val.value.string),
             else => self.push(val),
         }
         return self.*;
     }
 
-    fn handleCmd(self: *RockMachine, cmdName: RockString) !RockMachine {
+    fn handleCmd(self: *RockMachine, cmdName: *RockString) !RockMachine {
         if (self.depth > 0) {
-            self.push(RockVal{ .command = cmdName });
+            self.push(RockVal.ofCommand(cmdName));
             return self.*;
         }
 
-        const cmd = self.dictionary.get(cmdName) orelse {
+        const cmd = self.dictionary.get(cmdName.*) orelse {
             try stderr.print("Undefined: {s}\n", .{cmdName});
             return RockError.CommandUndefined;
         };
         return cmd.run(self);
     }
 
-    fn debug(self: RockMachine) void {
-        stderr.print("STACK:", .{}) catch {};
-        var node = self.curr.first;
-        while (node) |n| : (node = n.next) {
-            stderr.print(" {any}", .{n}) catch {};
-        }
-        stderr.print("\n", .{}) catch {};
-    }
-
     pub fn push(self: *RockMachine, val: RockVal) void {
         var node = RockNode{ .data = val };
-        self.curr.prepend(&node);
+        self.*.curr.prepend(&node);
     }
 
     pub fn push2(self: *RockMachine, vals: RockVal2) void {
@@ -109,7 +122,6 @@ pub const RockMachine = struct {
         return top.data;
     }
 
-    // Returns tuple with most recent val in zero, next most in 1.
     pub fn pop2(self: *RockMachine) !RockVal2 {
         const a = try self.pop();
         const b = self.pop() catch |e| {
@@ -124,29 +136,63 @@ pub const RockMachine = struct {
         var node = RockNest.Node{ .data = prev };
         self.nest.prepend(&node);
 
-        var curr = RockStack{};
-        self.curr = &curr;
+        self.curr = RockStack{};
     }
 
-    pub fn popContext(self: *RockMachine) !*RockStack {
-        const curr = self.curr;
-        const next = self.nest.popFirst() orelse return RockError.ContextStackUnderflow;
+    pub fn popContext(self: *RockMachine) !RockStack {
+        var curr = self.curr;
+        var next = self.nest.popFirst() orelse return RockError.ContextStackUnderflow;
         self.curr = next.data;
         return curr;
     }
 };
 
-pub const RockStack = SinglyLinkedList(RockVal);
-pub const RockNode = RockStack.Node;
+// TODO: Why did union(enum) blow up?
+pub const RockVal = struct {
+    type: RockType,
+    value: RockValue,
 
-pub const RockVal = union(enum) {
-    bool: bool,
-    i64: i64,
-    f64: f64,
-    command: RockString,
-    quote: *RockStack,
-    string: RockString,
-    // TODO: HashMap<RockVal, RockVal, ..., ...>
+    pub fn ofBool(b: bool) RockVal {
+        return RockVal{
+            .type = .bool,
+            .value = RockValue{ .bool = b },
+        };
+    }
+
+    pub fn ofI64(i: i64) RockVal {
+        return RockVal{
+            .type = .i64,
+            .value = RockValue{ .i64 = i },
+        };
+    }
+
+    pub fn ofF64(f: f64) RockVal {
+        return RockVal{
+            .type = .f64,
+            .value = RockValue{ .f64 = f },
+        };
+    }
+
+    pub fn ofCommand(cmd: *RockString) RockVal {
+        return RockVal{
+            .type = .command,
+            .value = RockValue{ .string = cmd },
+        };
+    }
+
+    pub fn ofString(s: *RockString) RockVal {
+        return RockVal{
+            .type = .string,
+            .value = RockValue{ .string = s },
+        };
+    }
+
+    pub fn ofQuote(q: RockStack) RockVal {
+        return RockVal{
+            .type = .quote,
+            .value = RockValue{ .quote = q },
+        };
+    }
 
     pub fn asBool(self: RockVal) ?bool {
         return switch (self) {
@@ -156,58 +202,75 @@ pub const RockVal = union(enum) {
     }
 
     pub fn asI64(self: RockVal) ?i64 {
-        return switch (self) {
-            .i64 => |i| i,
+        return switch (self.type) {
+            .i64 => self.value.i64,
             else => null,
         };
     }
 
     pub fn asF64(self: RockVal) ?f64 {
-        return switch (self) {
-            .f64 => |f| f,
+        return switch (self.type) {
+            .f64 => self.value.f64,
             else => null,
         };
     }
 
-    pub fn asCommand(self: RockVal) ?RockString {
-        return switch (self) {
-            .command => |cmd| cmd,
+    pub fn asCommand(self: RockVal) ?*RockString {
+        return switch (self.type) {
+            .command => self.value.string,
             else => null,
         };
     }
 
     pub fn asQuote(self: RockVal) ?RockStack {
-        return switch (self) {
-            .quote => |q| q.*,
+        return switch (self.type) {
+            .quote => self.value.quote,
             else => null,
         };
     }
 
-    pub fn asString(self: RockVal) ?RockString {
-        return switch (self) {
-            .string => |s| s,
+    pub fn asString(self: RockVal) ?*RockString {
+        return switch (self.type) {
+            .string => self.value.string,
             else => null,
         };
     }
 
     pub fn print(self: RockVal) !void {
-        switch (self) {
-            .bool => |b| try stdout.print("{}", .{b}),
-            .i64 => |i| try stdout.print("{}", .{i}),
-            .f64 => |f| try stdout.print("{}", .{f}),
-            .command => |cmd| try stdout.print("\\{s}", .{cmd}),
-            .quote => |q| {
+        switch (self.type) {
+            .bool => try stdout.print("{}", .{self.value.bool}),
+            .i64 => try stdout.print("{}", .{self.value.i64}),
+            .f64 => try stdout.print("{}", .{self.value.f64}),
+            .command => try stdout.print("\\{s}", .{self.value.string}),
+            .string => try stdout.print("\"{s}\"", .{self.value.string}),
+            .quote => {
                 try stdout.print("[ ", .{});
-                var node = q.first;
-                while (node) |n| {
+                var node = self.value.quote.first;
+                while (node) |n| : (node = n.next) {
                     try n.data.print();
-                    node = n.next;
+                    try stdout.print(" ", .{});
                 }
-                try stdout.print(" ]", .{});
+                try stdout.print("]", .{});
             },
-            .string => |s| try stdout.print("{s}", .{s}),
         }
     }
+};
+
+pub const RockType = enum {
+    bool,
+    i64,
+    f64,
+    command,
+    string,
+    quote,
+};
+
+pub const RockValue = union {
+    bool: bool,
+    i64: i64,
+    f64: f64,
+    string: *RockString,
+    quote: RockStack,
 };
 
 pub const RockVal2 = struct {

@@ -1,2 +1,2 @@
-# Requires at least Zig 0.11.0 (for dependency management)
-zig master
+zig 0.10.1
+

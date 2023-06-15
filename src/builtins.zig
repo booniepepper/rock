@@ -29,8 +29,8 @@ pub fn def(state: *RockMachine) !RockMachine {
         return RockError.WrongArguments;
     }
 
-    try state.dictionary.put(name.?, RockCommand{
-        .name = name.?,
+    try state.dictionary.put(name.?.*, RockCommand{
+        .name = name.?.*,
         .description = "TODO",
         .action = RockAction{
             .quote = quote.?,
@@ -41,7 +41,7 @@ pub fn def(state: *RockMachine) !RockMachine {
 }
 
 pub fn pl(state: *RockMachine) !RockMachine {
-    const val = try state.pop();
+    var val = try state.pop();
     try val.print();
     try stdout.print("\n", .{});
     return state.*;
